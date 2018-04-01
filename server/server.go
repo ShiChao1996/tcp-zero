@@ -29,7 +29,6 @@ func NewServer(addr string, protocol interfaces.Protocol) *Server {
 		Addr:     addr,
 		Protocol: protocol,
 		close:    make(chan struct{}),
-		Hub:      newHub(),
 	}
 }
 
@@ -40,6 +39,10 @@ func (srv *Server) ListenAndServe() error {
 		return err
 	}
 
+	if srv.Hub == nil {
+		srv.Hub = newHub()
+	}
+
 	return srv.Serve(l)
 }
 
@@ -48,6 +51,7 @@ func (srv *Server) Serve(l net.Listener) error {
 	srv.listener = l
 	defer func() {
 		srv.listener.Close()
+		srv.close <- struct{}{}
 	}()
 
 	for {
@@ -55,6 +59,12 @@ func (srv *Server) Serve(l net.Listener) error {
 			conn net.Conn
 			err  error
 		)
+
+		select {
+		case <-srv.close:
+			return nil
+		default:
+		}
 
 		conn, err = srv.listener.Accept()
 		if err != nil {
@@ -67,14 +77,17 @@ func (srv *Server) Serve(l net.Listener) error {
 		}
 
 		session := newSession(conn)
-		srv.Put(session)
 
 		go func() {
 			srv.Send(*session)
 		}()
 
 		if srv.Protocol != nil {
-			go srv.Protocol.Handler(session, srv.close)
+			go func() {
+				srv.Put(session)
+				srv.Protocol.Handler(session, srv.close)
+				srv.Remove(session)
+			}()
 		}
 	}
 }
@@ -127,6 +140,12 @@ func (srv *Server) Destroy() error {
 
 func (srv *Server) Send(session session) {
 	for {
+		select {
+		case <-srv.close:
+			return
+		default:
+		}
+
 		msg, _ := session.queue.Wait()
 		b, _ := msg.Encode()
 
